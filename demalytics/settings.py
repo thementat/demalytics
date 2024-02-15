@@ -38,8 +38,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.gis',
     'census',
-    'sdmx',
-    'storage',
+#    'sdmx',
+#   'storage',
 ]
 
 MIDDLEWARE = [
@@ -82,8 +82,8 @@ DATABASES = {
         'ENGINE': 'django.contrib.gis.db.backends.postgis',
         'NAME': 'demalytics',
         'USER': 'postgres',
-        'PASSWORD': 'SilverPCar911',
-        'HOST': 'django-dev.ctafbappabcy.us-west-2.rds.amazonaws.com',
+        'PASSWORD': 'postgres',
+        'HOST': 'localhost',
         'PORT': 5432,
     }
 }
@@ -126,6 +126,7 @@ USE_L10N = True
 
 USE_TZ = True
 
+GOOGLE_API_KEY = 'AIzaSyCJy798cfgFSNd9XpXgfBRnxVN8S4WLWAU'
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/3.2/howto/static-files/
