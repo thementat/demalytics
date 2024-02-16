@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.gis',
     'census',
+    'divs',
 #    'sdmx',
 #   'storage',
 ]
@@ -127,6 +128,7 @@ USE_L10N = True
 USE_TZ = True
 
 GOOGLE_API_KEY = 'AIzaSyCJy798cfgFSNd9XpXgfBRnxVN8S4WLWAU'
+BASE_COUNTRY = 'CA'
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/3.2/howto/static-files/
