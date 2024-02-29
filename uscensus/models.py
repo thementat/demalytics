@@ -1,8 +1,4 @@
-from django.contrib.gis.db import models
-from pathlib import Path
-from django.contrib.gis.utils import LayerMapping
-
-# Create your models here.
+from django.db import models
 
 '''
 class BGBoundary(models.Model):
