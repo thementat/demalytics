@@ -37,9 +37,10 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.contrib.gis',
-    'census',
+    'cacensus',
+    'main',
 #    'sdmx',
-#   'storage',
+    'storage',
 ]
 
 MIDDLEWARE = [
