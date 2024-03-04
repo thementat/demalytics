@@ -1,11 +1,7 @@
 from django.contrib.gis.db import models
 from cacensus.models import DABoundary, getCensusData
-from django.contrib.gis.db.models.functions import Transform, Union
-from django.db.models.signals import pre_save
-from django.dispatch import receiver
-import requests
-import json
-from django.contrib.gis.geos import Polygon, MultiPolygon
+from django.contrib.gis.db.models.functions import Transform
+
 
 # Create your models here.
 
@@ -80,7 +76,6 @@ class Study(models.Model):
         boundaries = Boundary.objects.bulk_create(boundaries)
 
     def popdata(self):
-
 
         self.boundarydata_set.all().delete()
 

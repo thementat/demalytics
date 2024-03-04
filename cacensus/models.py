@@ -13,8 +13,6 @@ class DABoundary(models.Model):
     pruid = models.CharField(max_length=2)
     geom = models.MultiPolygonField(srid=3347, spatial_index=True)
 
-    def __str__(self):
-        return f"{self.name}"
 
     @staticmethod
     def shp_import(shapefile):
@@ -27,7 +25,7 @@ class DABoundary(models.Model):
             'geom': 'MULTIPOLYGON',
         }
 
-        # shapefile = '/Users/chrisbradley/Downloads/lda_000a21a_e'
+        # shapefile = '/Users/chrisbradley/Downloads/lda_000b21a_e'
 
         lm = LayerMapping(DABoundary, shapefile, da_mapping, transform=False)
         lm.save(strict=True, verbose=True)

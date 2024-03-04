@@ -1,12 +1,15 @@
 from django.contrib.gis.db import models
 from django.contrib.gis.db.models import Collect
 from django.contrib.gis.geos import GEOSGeometry, MultiPolygon, Polygon
-from django.contrib.gis.db.models.functions import Transform, Union
+from django.contrib.gis.db.models.functions import Transform, Area, AsGeoJSON
+from django.db.models import F, Q, Sum, Prefetch
 import requests, json, os
 from main.models import Boundary, BoundaryData, Study
+from mapbox.utils import Source, Tileset
 from cacensus.models import DABoundary
-from django.db.models import F, Q, Sum, Prefetch
 from collections import defaultdict
+
+from django.core import serializers
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
@@ -281,63 +284,129 @@ class Coefficient(models.Model):
         return f"{self.name}"
 
 
-def addBoundaries(study):
-    # The Study geometry contains several Boundaries, however, our analysis also requires the Boundaries that are
-    # contained by the StorePerims.  This function adds those boundaries.
+class StorageStudy(Study):
+    class Meta:
+        proxy = True
+
+    def addBoundaries(self):
+        # The Study geometry contains several Boundaries, however, our analysis also requires the Boundaries that are
+        # contained by the StorePerims.  This function adds those boundaries.
 
 
-    stores_within_geometry = Store.objects.filter(geom__within=study.geom)
-    unioned_isos = StorePerim.objects.filter(store__in=stores_within_geometry).aggregate(unioned_geoms=Collect('geom'))
-    collected_geometry = unioned_isos['unioned_geoms'].unary_union
-    bounds = DABoundary.objects.filter(
-        geom__intersects=Transform(collected_geometry, 3347)).annotate(
-        transformed_geom=Transform('geom', 3857))
+        stores_within_geometry = Store.objects.filter(geom__within=self.geom)
+        unioned_isos = StorePerim.objects.filter(store__in=stores_within_geometry).aggregate(unioned_geoms=Collect('geom'))
+        collected_geometry = unioned_isos['unioned_geoms'].unary_union
+        bounds = DABoundary.objects.filter(
+            geom__intersects=Transform(collected_geometry, 3347)).annotate(
+            transformed_geom=Transform('geom', 3857))
 
-    boundaries = []
-    for b in bounds:
-        boundaries.append(Boundary(study=study
-                                   , ext_id=b.dauid
-                                   , geom=b.transformed_geom))
+        boundaries = []
+        for b in bounds:
+            boundaries.append(Boundary(study=self
+                                       , ext_id=b.dauid
+                                       , geom=b.transformed_geom))
 
-    boundaries = Boundary.objects.bulk_create(boundaries, ignore_conflicts=True)
+        boundaries = Boundary.objects.bulk_create(boundaries, ignore_conflicts=True)
 
-def processStudy(study):
-    # This calculates the demand & supply for a Study object.
+    def processStudy(self):
+        # This calculates the demand & supply for a Study object.
 
-    # add the new boundaries
-    addBoundaries(study)
+        # add the new boundaries
+        self.addBoundaries()
 
-    # populate the characteristic data
-    study.popdata()
+        # populate the characteristic data
+        self.popdata()
 
-    # retrieve the required DemandModel and calculate demandanalysis
-    # currently the characteristics are retrieved here
-    d = DemandModel.objects.get(name='CSSVS')
-    d.calcDemand(study=study)
+        # retrieve the required DemandModel and calculate demandanalysis
+        # currently the characteristics are retrieved here
+        d = DemandModel.objects.get(name='CSSVS')
+        d.calcDemand(study=self)
 
-    # calculate the StorePerimBoundary Supply
-    sm = SupplyModel.objects.get(id=1)
-    sm.calcSPBSupply(study)
+        # calculate the StorePerimBoundary Supply
+        sm = SupplyModel.objects.get(id=1)
+        sm.calcSPBSupply(self)
 
 
-    # Assuming StorePerimBoundary is populated, Get boundary and supplymodel pairs from StorePerimBoundary
-    queryset = StorePerimBoundary.objects.values('boundary', 'supplymodel').distinct()
+        # Assuming StorePerimBoundary is populated, Get boundary and supplymodel pairs from StorePerimBoundary
+        queryset = StorePerimBoundary.objects.values('boundary', 'supplymodel').distinct()
 
-    supply_analysis_list = []
+        supply_analysis_list = []
 
-    # Calculate the supply for each boundary
-    for obj in queryset:
-        # Get total supply for current boundary and supplymodel
-        total_supply = \
-            StorePerimBoundary.objects.filter(boundary=obj['boundary'], supplymodel=obj['supplymodel']).aggregate(
-                supply=Sum('sqft'))['supply']
+        # Calculate the supply for each boundary
+        for obj in queryset:
+            # Get total supply for current boundary and supplymodel
+            total_supply = \
+                StorePerimBoundary.objects.filter(boundary=obj['boundary'], supplymodel=obj['supplymodel']).aggregate(
+                    supply=Sum('sqft'))['supply']
 
-        # Create new SupplyAnalysis instance
-        supply_analysis = SupplyAnalysis(boundary_id=obj['boundary'], supplymodel_id=obj['supplymodel'],
-                                         study=study, supply=total_supply)
-        supply_analysis_list.append(supply_analysis)
+            # Create new SupplyAnalysis instance
+            supply_analysis = SupplyAnalysis(boundary_id=obj['boundary'], supplymodel_id=obj['supplymodel'],
+                                             study=self, supply=total_supply)
+            supply_analysis_list.append(supply_analysis)
 
-    # Bulk create SupplyAnalysis instances
-    SupplyAnalysis.objects.bulk_create(supply_analysis_list)
+        # Bulk create SupplyAnalysis instances
+        SupplyAnalysis.objects.bulk_create(supply_analysis_list)
 
+    def uploadStudy(self, filename='output.geojson'):
+        # This uploads the Study data to mapbox
+
+        study_id = self.id
+
+        rows = (
+            Boundary.objects
+            .filter(study_id=study_id,
+                    demandanalysis__study_id=F('study_id'),
+                    supplyanalysis__study_id=F('study_id'),
+                    geom__intersects=self.geom)
+            .annotate(
+                demand=F('demandanalysis__demand'),
+                supply=F('supplyanalysis__supply'),
+                demandmodel_id=F('demandanalysis__id'),
+                supplymodel_id=F('supplyanalysis__id'),
+                residual=F('demandanalysis__demand') - F('supplyanalysis__supply'),
+                residualgraphic=(F('demandanalysis__demand') - F('supplyanalysis__supply')) / (Area('geom') * 1000000),
+                geom_as_geojson=AsGeoJSON(Transform('geom', 4326))
+            )
+            .values('ext_id', 'study_id', 'demandmodel_id', 'supplymodel_id', 'demand', 'supply',
+                    'residual', 'residualgraphic', 'geom_as_geojson')
+        )
+
+        # Here we create NDJSON by simply joining individual JSON (GeoJSON) Lines.
+        geojson_ndjson_str = "\n".join([
+            json.dumps({
+                "type": "Feature",
+                "properties": {
+                    "ext_id": row['ext_id'],
+                    "study_id": row['study_id'],
+                    "demandmodel_id": row['demandmodel_id'],
+                    "supplymodel_id": row['supplymodel_id'],
+                    "demand": row['demand'],
+                    "supply": row['supply'],
+                    "residual": row['residual'],
+                    "residualgraphic": row['residualgraphic']
+                },
+                "geometry": json.loads(row['geom_as_geojson'])  # Convert GeoJSON from string
+            })
+            for row in rows
+        ]).encode('utf-8')
+
+        s = Source('bounddata_' + str(self.id), 'propsavant', os.getenv('MB_KEY'))
+        s.upload('bounddata_' + str(self.id), geojson_ndjson_str)
+        t = Tileset('bounddata_' + str(self.id), 'propsavant', os.getenv('MB_KEY'))
+
+        recipe = {
+            "version": 1,
+            "layers": {
+                "my_new_layer": {
+                    "source": "mapbox://tileset-source/propsavant/bounddata_" + str(self.id),
+                    "minzoom": 10,
+                    "maxzoom": 15
+                }
+            }
+        }
+
+        name = 'bounddata_' + str(self.id)
+
+        t.create(recipe, name)
+        t.publish()
 
