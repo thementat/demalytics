@@ -712,32 +712,24 @@ class StorageStudy(Study):
             Store.objects
             .filter(geom__intersects=self.geom)
             .annotate(
-                geom_as_geojson=AsGeoJSON('geom')
+                geom_as_geojson=AsGeoJSON(Transform('geom', 4326))
             )
-            .values('boundary_id', 'study_id', 'demandmodel_id', 'supplymodel_id', 'demand', 'supply',
-                    'residual', 'residualgraphic', 'geom_as_geojson')
+            .values('masterid', 'storeid', 'storename', 'url', 'totalsqft', 'rentablesqft', 'geom_as_geojson')
         )
 
 
 
 
-        rows = (BoundaryAnalysis.objects
-                                .filter(demandmodel=demandmodel)
-                                .filter(supplymodel=supplymodel)
-                                )
-
         geojson_ndjson_str = "\n".join([
             json.dumps({
                 "type": "Feature",
                 "properties": {
-                    "boundary_id": row['boundary_id'],
-                    "study_id": row['study_id'],
-                    "demandmodel_id": row['demandmodel_id'],
-                    "supplymodel_id": row['supplymodel_id'],
-                    "demand": row['demand'],
-                    "supply": row['supply'],
-                    "residual": row['residual'],
-                    "residualgraphic": row['residualgraphic']
+                    "masterid": row['masterid'],
+                    "storeid": row['storeid'],
+                    "storename": row['storename'],
+                    "url": row['url'],
+                    "totalsqft": row['totalsqft'],
+                    "rentablesqft": row['rentablesqft']
                 },
                 "geometry": json.loads(row['geom_as_geojson'])  # Convert GeoJSON from string
             })
@@ -751,8 +743,8 @@ class StorageStudy(Study):
         recipe = {
             "version": 1,
             "layers": {
-                "my_new_layer": {
-                    "source": "mapbox://tileset-source/propsavant/bounddata_" + str(self.id),
+                "stores": {
+                    "source": "mapbox://tileset-source/propsavant/" + codestring,
                     "minzoom": 10,
                     "maxzoom": 13
                 }
