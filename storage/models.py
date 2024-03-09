@@ -551,6 +551,7 @@ class StorageStudy(Study):
         t.publish()
 
     def calcAnalysis(self):
+        # calculates the BoundaryAnalysis instances for the study
         insert = []
         #first gather all boundaries in the study and prefetch the related perims
         allboundaries = (
@@ -659,11 +660,6 @@ class StorageStudy(Study):
 
 
 
-        rows = (BoundaryAnalysis.objects
-                                .filter(demandmodel=demandmodel)
-                                .filter(supplymodel=supplymodel)
-                                )
-
         geojson_ndjson_str = "\n".join([
             json.dumps({
                 "type": "Feature",
@@ -692,8 +688,8 @@ class StorageStudy(Study):
         recipe = {
             "version": 1,
             "layers": {
-                "my_new_layer": {
-                    "source": "mapbox://tileset-source/propsavant/bounddata_" + str(self.id),
+                "residual_demand": {
+                    "source": "mapbox://tileset-source/propsavant/" + codestring,
                     "minzoom": 10,
                     "maxzoom": 13
                 }
