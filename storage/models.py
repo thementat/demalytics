@@ -1,13 +1,15 @@
 from django.contrib.gis.db import models
 from django.contrib.gis.db.models import Collect
-from django.contrib.gis.geos import GEOSGeometry, MultiPolygon, Polygon
-from django.contrib.gis.db.models.functions import Transform, Area, AsGeoJSON
+from django.contrib.gis.geos import GEOSGeometry, MultiPolygon, Polygon, Point
+from django.contrib.gis.db.models.functions import Transform, Area, AsGeoJSON, Centroid, Union
 from django.db.models import F, Q, Sum, Prefetch
 import requests, json, os
 from main.models import Boundary, BoundaryData, Study
 from mapbox.utils import Source, Tileset
 from cacensus.models import DABoundary
 from collections import defaultdict
+import pandas as pd
+import csv
 
 from django.core import serializers
 from django.db.models.signals import post_save
@@ -24,13 +26,15 @@ class Store(models.Model):
     city = models.CharField(max_length=100, null=True, blank=True)
     state = models.CharField(max_length=100, null=True, blank=True)
     zipcode = models.CharField(max_length=10, null=True, blank=True)
-    geom = models.PointField(srid=3857)
+    geom = models.PointField(srid=3857, null=True, blank=True)
+    phone = models.CharField(max_length=20, null=True, blank=True)
+    email = models.CharField(max_length=50, null=True, blank=True)
     yearbuilt = models.IntegerField(null=True, blank=True)
     totalsqft = models.IntegerField(null=True, blank=True)
     rentablesqft = models.IntegerField(null=True, blank=True)
     storetype = models.CharField(max_length=50, null=True, blank=True)
     companytype = models.CharField(max_length=50, null=True, blank=True)
-    classtype = models.CharField(max_length=1, null=True, blank=True)
+
 
 
     def __str__(self):
@@ -83,19 +87,76 @@ class Store(models.Model):
         self._original_geom = self.geom
 
     def save(self, *args, **kwargs):
-        if self.pk is None:  # If this is a new instance
-            self.updateStorePerims()
-        else:                # If this is an existing instance
+        # check if this instance already exists in the database
+        if Store.objects.filter(pk=self.pk).exists():
+            # update perims if sqft or geom change
             if self.geom != self._original_geom:
+                super().save(*args, **kwargs)
                 self.updateStorePerims()
-            if self.rentablesqft != self._original_rentablesqft:
+            elif self.rentablesqft != self._original_rentablesqft:
+                super().save(*args, **kwargs)
                 self.updateStorePerims()
+            else:
+                super().save(*args, **kwargs)
+
+        else:
+            super().save(*args, **kwargs)
+            self.updateStorePerims()
 
 
-        super().save(*args, **kwargs)
+
+
+
+
+
         # After saving, update the original geometry so that subsequent saves won't trigger updateStorePerims
         # unless the geometry is changed again.
-        self._original_geom = self.geom
+        #self._original_geom = self.geom
+
+    @staticmethod
+    def importCSV(file):
+        with open(file, 'r') as f:
+            f = open(file, 'r')
+            reader = csv.reader(f)
+            header = next(reader)
+            for row in reader:
+                data = dict(zip(header, row))
+
+                longitude = data.get('Longitude', None)
+                latitude = data.get('Latitude', None)
+                if longitude is not None and latitude is not None:
+                    try:
+                        longitude = float(longitude)
+                        latitude = float(latitude)
+                        geom = Transform(Point(longitude, latitude, srid=4326), 3857)
+                    except ValueError:
+                        raise ValueError("Longitude and Latitude must be numeric")
+                else:
+                    raise KeyError("Both Longitude and Latitude needed")
+
+                yearbuilt = data.get('Year Built')
+                if not str(yearbuilt).isdigit():
+                    yearbuilt = None
+
+                s = Store(masterid=data['\ufeffMasterID'],
+                          storeid=data['StoreID'],
+                          storename=data['StoreName'],
+                          url=data['url'],
+                          address=data['Address'],
+                          city=data['City'],
+                          state=data['State'],
+                          zipcode=data['ZipCode'],
+                          geom=Point(longitude, latitude, srid=4326),
+                          phone=data['Store Phone Number'],
+                          email=data['Store Email Address'],
+                          yearbuilt=yearbuilt,
+                          totalsqft=int(data['Total Square Footage'].replace(',', '')),
+                          rentablesqft=int(data['Total Rent-able Square Footage'].replace(',', '')),
+                          storetype=data['Storage Type'],
+                          companytype=data['CompanyType']
+                          )
+                s.geom.transform(3857)
+                s.save()
 
 
 class PerimSet(models.Model):
@@ -112,6 +173,13 @@ class StorePerim(models.Model):
     # contains the perimieter geometries centered on each store
     # created by Store.updateStorePerims()
     store = models.ForeignKey(Store, on_delete=models.CASCADE)
+    perim = models.ForeignKey(Perim, on_delete=models.CASCADE)
+    geom = models.MultiPolygonField(srid=3857)
+
+class BoundaryPerim(models.Model):
+    # contains the perimieter geometries centered on each boundary
+    # created by Boundary.updateStorePerims()
+    boundary = models.ForeignKey(Boundary, on_delete=models.CASCADE)
     perim = models.ForeignKey(Perim, on_delete=models.CASCADE)
     geom = models.MultiPolygonField(srid=3857)
 
@@ -213,7 +281,7 @@ class DemandModel(models.Model):
     fields = models.ManyToManyField('main.Characteristic', through='Coefficient')
 
     def calcDemand(self, study):
-        # the only method we use currently is hard-coded here
+        # the only method we use currently, 'CSSVS', is hard-coded here
         #TODO: eventually maybe rewrite this to use a heierarchical model to store arithmetic operations?
         DemandAnalysis.objects.filter(study=study).filter(demandmodel=self).delete()
         if self.name=='CSSVS':
@@ -283,30 +351,102 @@ class Coefficient(models.Model):
     def __str__(self):
         return f"{self.name}"
 
-
-class StorageStudy(Study):
+class StorageBoundary(Boundary):
+    # extends the Boundary model with storage specific methods
     class Meta:
         proxy = True
 
+    def updatePerims(self):
+        #delete old perims
+        BoundaryPerim.objects.filter(boundary=self).delete()
+
+        key = os.getenv('MB_KEY')
+        url = 'https://api.mapbox.com/isochrone/v1/'
+        profile = 'mapbox/driving'
+        result = StorageBoundary.objects.filter(id=self.id).annotate(centroid=Centroid(Transform('geom', 4326))).first()
+        coord = result.centroid
+
+
+        # get the times we need for models
+        times = Perim.objects.filter(perimset__name='ISO').order_by('name')
+        timestr = ''
+        isos = []
+        for i, t in enumerate(times, start=1):
+            timestr = timestr + ',' + str(t.name)
+
+            # only permits 4 isos per request
+            if i % 4 == 0 or i == len(times):
+                timestr = timestr[1:]
+                api_url = url \
+                          + profile + '/'\
+                          + str(coord.x) + ',' + str(coord.y) + '?' \
+                          + 'contours_minutes=' + timestr \
+                          + '&polygons=true&access_token=' \
+                          + key
+                response = requests.get(api_url)
+                j = response.json()
+
+                isos = isos + j['features']
+                timestr = ''
+
+        for i, iso in enumerate(isos):
+            g = GEOSGeometry(json.dumps(iso['geometry']))
+            m = MultiPolygon(g)
+            m.srid = g.srid
+            m.transform(3857)
+
+            BoundaryPerim(boundary=self, perim=times.get(name=iso['properties']['contour']), geom=m).save()
+
+
+
+
+class StorageStudy(Study):
+
+    #extends the Study model with storage specific methods
+    class Meta:
+        proxy = True
+
+    def addPerims(self):
+        #TODO: do we add this to a save() functin?
+        p = StorageBoundary.objects.filter(study=self)
+        for i in p:
+            if len(i.boundaryperim_set.all()) == 0:
+                i.updatePerims()
+
+
     def addBoundaries(self):
         # The Study geometry contains several Boundaries, however, our analysis also requires the Boundaries that are
-        # contained by the StorePerims.  This function adds those boundaries.
+        # contained by the StorePerims and BoundaryPerims.  This function adds those boundaries.
 
-
+        # TODO: add other boundaries extending from the perimeters from the existing boundaries and other Stores
         stores_within_geometry = Store.objects.filter(geom__within=self.geom)
-        unioned_isos = StorePerim.objects.filter(store__in=stores_within_geometry).aggregate(unioned_geoms=Collect('geom'))
-        collected_geometry = unioned_isos['unioned_geoms'].unary_union
-        bounds = DABoundary.objects.filter(
-            geom__intersects=Transform(collected_geometry, 3347)).annotate(
-            transformed_geom=Transform('geom', 3857))
+        boundarys_within_geometry = Boundary.objects.filter(geom__within=self.geom)
+        s_unioned_isos = (StorePerim.objects
+                            .filter(store__in=stores_within_geometry)
+                            .aggregate(unioned_geoms=Collect('geom')
+                            )['unioned_geoms']
+                            )
+        b_unioned_isos = (BoundaryPerim.objects
+                            .filter(boundary__in=boundarys_within_geometry)
+                            .aggregate(unioned_geoms=Collect('geom')
+                            )['unioned_geoms']
+                            )
+        collected_geometry = Union(s_unioned_isos.unary_union, b_unioned_isos.unary_union)
 
-        boundaries = []
+        # exclude boundaries that are already in teh Boundary table
+        ext_ids_to_exclude = Boundary.objects.all().values_list('ext_id', flat=True)
+        bounds = (DABoundary.objects
+                .filter(geom__intersects=Transform(collected_geometry, 3347))
+                .exclude(dauid__in=ext_ids_to_exclude)
+                .annotate(transformed_geom=Transform('geom', 3857))
+                )
+
         for b in bounds:
-            boundaries.append(Boundary(study=self
-                                       , ext_id=b.dauid
-                                       , geom=b.transformed_geom))
+            sb = StorageBoundary(study=self, ext_id=b.dauid, geom=b.transformed_geom)
+            sb.save()
+            sb.updatePerims()
 
-        boundaries = Boundary.objects.bulk_create(boundaries, ignore_conflicts=True)
+
 
     def processStudy(self):
         # This calculates the demand & supply for a Study object.
@@ -347,7 +487,7 @@ class StorageStudy(Study):
         # Bulk create SupplyAnalysis instances
         SupplyAnalysis.objects.bulk_create(supply_analysis_list)
 
-    def uploadStudy(self, filename='output.geojson'):
+    def uploadDSAnalysis(self, filename='output.geojson'):
         # This uploads the Study data to mapbox
 
         study_id = self.id
@@ -400,7 +540,7 @@ class StorageStudy(Study):
                 "my_new_layer": {
                     "source": "mapbox://tileset-source/propsavant/bounddata_" + str(self.id),
                     "minzoom": 10,
-                    "maxzoom": 15
+                    "maxzoom": 13
                 }
             }
         }
@@ -409,4 +549,249 @@ class StorageStudy(Study):
 
         t.create(recipe, name)
         t.publish()
+
+    def calcAnalysis(self):
+        insert = []
+        #first gather all boundaries in the study and prefetch the related perims
+        allboundaries = (
+            StorageBoundary.objects
+            .prefetch_related('boundaryperim_set')
+            .filter(study_id=self.id,
+                    demandanalysis__study_id=F('study_id'),
+                    supplyanalysis__study_id=F('study_id'),
+                    )
+            .annotate(
+                demand=F('demandanalysis__demand'),
+                supply=F('supplyanalysis__supply'),
+                demandmodel_id=F('demandanalysis__id'),
+                supplymodel_id=F('supplyanalysis__id'),
+                area=Area('geom'),
+                transformed_geom=Transform('geom', 4326)
+                )
+            )
+
+        studyboundaries = allboundaries.filter(geom__intersects=self.geom)
+
+        weights = ModelWeights.objects.filter(supplymodel__name='SSA')
+
+        for b in studyboundaries:
+
+            #retrieve the perims for this Boundary
+            perims = b.boundaryperim_set.order_by('perim__name')
+
+            # create a null perimeter
+            poly = [(0, 0), (0, 1), (1, 1), (1, 0), (0, 0)]
+            previous_p = BoundaryPerim(boundary=b,
+                                    perim=Perim(perimset=PerimSet.objects.get(id=1), name='blank'),
+                                    geom=MultiPolygon(Polygon(poly))
+                                    )
+
+            stats = []
+            for i, p in enumerate(perims):
+
+                weight = weights.get(perim=p.perim).weight
+                # find the boundaries that are intersected by p, but not intersected by previous_p
+                pstats = (allboundaries
+                            .filter(geom__intersects=p.geom)
+                            .filter(~Q(geom__intersects=previous_p.geom))
+                            .filter(
+                                demandanalysis__study_id=F('study_id'),
+                                supplyanalysis__study_id=F('study_id')
+                            ).values(
+                                'study_id', 'demandanalysis__demandmodel_id', 'supplyanalysis__supplymodel_id'
+                            ).annotate(
+                                demand=Sum('demandanalysis__demand') * weight,
+                                supply=Sum('supplyanalysis__supply') * weight
+                            )
+                )
+
+                stats = stats + list(pstats)
+
+                previous_p = p
+
+            # use a pandas dataframe to sum and group by study, demandmodel & supplymodel
+            statsdf = pd.DataFrame(stats)
+            grouped = statsdf.groupby(['study_id', 'demandanalysis__demandmodel_id', 'supplyanalysis__supplymodel_id'])[
+                ['demand', 'supply']].sum().reset_index()
+            statsagg = grouped.to_dict(orient='records')
+
+
+            for s in statsagg:
+                insert.append(BoundaryAnalysis(
+                    boundary = b,
+                    demandmodel_id = s['demandanalysis__demandmodel_id'],
+                    supplymodel_id = s['supplyanalysis__supplymodel_id'],
+                    study_id = s['study_id'],
+                    demand = s['demand'],
+                    supply = s['supply'],
+                    residual = s['demand'] - s['supply'],
+                    residualgraphic = (s['demand'] - s['supply']) / b.area.sq_m,
+                    geom = b.transformed_geom
+                    )
+                )
+        BoundaryAnalysis.objects.filter(study=self).delete()
+        BoundaryAnalysis.objects.bulk_create(insert)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def uploadBAnalysis(self, demandmodel, supplymodel):
+        # This uploads the Study Analysis to mapbox
+
+        codestring = ('BA'
+                      + '_s' + str(self.id)
+                      + '_dm' + str(demandmodel.id)
+                      + '_sm' + str(supplymodel.id)
+                      )
+
+        rows = (
+            BoundaryAnalysis.objects
+            .filter(study_id=self.id,
+                    demandmodel=demandmodel,
+                    supplymodel=supplymodel)
+            .annotate(
+                geom_as_geojson=AsGeoJSON('geom')
+            )
+            .values('boundary_id', 'study_id', 'demandmodel_id', 'supplymodel_id', 'demand', 'supply',
+                    'residual', 'residualgraphic', 'geom_as_geojson')
+        )
+
+
+
+
+        rows = (BoundaryAnalysis.objects
+                                .filter(demandmodel=demandmodel)
+                                .filter(supplymodel=supplymodel)
+                                )
+
+        geojson_ndjson_str = "\n".join([
+            json.dumps({
+                "type": "Feature",
+                "properties": {
+                    "boundary_id": row['boundary_id'],
+                    "study_id": row['study_id'],
+                    "demandmodel_id": row['demandmodel_id'],
+                    "supplymodel_id": row['supplymodel_id'],
+                    "demand": row['demand'],
+                    "supply": row['supply'],
+                    "residual": row['residual'],
+                    "residualgraphic": row['residualgraphic']
+                },
+                "geometry": json.loads(row['geom_as_geojson'])  # Convert GeoJSON from string
+            })
+            for row in rows
+        ]).encode('utf-8')
+
+
+
+
+        s = Source(codestring, 'propsavant', os.getenv('MB_KEY'))
+        s.upload(codestring, geojson_ndjson_str)
+        t = Tileset(codestring, 'propsavant', os.getenv('MB_KEY'))
+
+        recipe = {
+            "version": 1,
+            "layers": {
+                "my_new_layer": {
+                    "source": "mapbox://tileset-source/propsavant/bounddata_" + str(self.id),
+                    "minzoom": 10,
+                    "maxzoom": 13
+                }
+            }
+        }
+
+
+
+        t.create(recipe, codestring)
+        t.publish()
+
+    def uploadStores(self):
+        # This uploads the Study Analysis to mapbox
+
+        codestring = ('ST'
+                      + '_s' + str(self.id)
+                      )
+
+        rows = (
+            Store.objects
+            .filter(geom__intersects=self.geom)
+            .annotate(
+                geom_as_geojson=AsGeoJSON('geom')
+            )
+            .values('boundary_id', 'study_id', 'demandmodel_id', 'supplymodel_id', 'demand', 'supply',
+                    'residual', 'residualgraphic', 'geom_as_geojson')
+        )
+
+
+
+
+        rows = (BoundaryAnalysis.objects
+                                .filter(demandmodel=demandmodel)
+                                .filter(supplymodel=supplymodel)
+                                )
+
+        geojson_ndjson_str = "\n".join([
+            json.dumps({
+                "type": "Feature",
+                "properties": {
+                    "boundary_id": row['boundary_id'],
+                    "study_id": row['study_id'],
+                    "demandmodel_id": row['demandmodel_id'],
+                    "supplymodel_id": row['supplymodel_id'],
+                    "demand": row['demand'],
+                    "supply": row['supply'],
+                    "residual": row['residual'],
+                    "residualgraphic": row['residualgraphic']
+                },
+                "geometry": json.loads(row['geom_as_geojson'])  # Convert GeoJSON from string
+            })
+            for row in rows
+        ]).encode('utf-8')
+
+        s = Source(codestring, 'propsavant', os.getenv('MB_KEY'))
+        s.upload(codestring, geojson_ndjson_str)
+        t = Tileset(codestring, 'propsavant', os.getenv('MB_KEY'))
+
+        recipe = {
+            "version": 1,
+            "layers": {
+                "my_new_layer": {
+                    "source": "mapbox://tileset-source/propsavant/bounddata_" + str(self.id),
+                    "minzoom": 10,
+                    "maxzoom": 13
+                }
+            }
+        }
+
+        t.create(recipe, codestring)
+        t.publish()
+
+
+    def save(self, *args, **kwargs):
+        # check if this instance already exists in the database
+        if StorageBoundary.objects.filter(pk=self.pk).exists():
+            # update perims if geom changes
+            if self.geom != self._original_geom:
+                super().save(*args, **kwargs)
+                self.addPerims()
+            else:
+                super().save(*args, **kwargs)
+
+        else:
+            super().save(*args, **kwargs)
+            self.addPerims()
+
+
+
+class BoundaryAnalysis(models.Model):
+    boundary = models.ForeignKey(Boundary, on_delete=models.CASCADE)
+    demandmodel = models.ForeignKey(DemandModel, on_delete=models.CASCADE)
+    supplymodel = models.ForeignKey(SupplyModel, on_delete=models.CASCADE)
+    study = models.ForeignKey(Study, on_delete=models.CASCADE)
+    demand = models.FloatField()
+    supply = models.FloatField()
+    residual = models.FloatField()
+    residualgraphic = models.FloatField()
+    geom = models.MultiPolygonField(srid=4326)
+
 

@@ -35,7 +35,7 @@ class Study(models.Model):
     description = models.TextField(null=True)
     country = models.CharField(max_length=2)
     type = models.CharField(max_length=2)
-    characteristics = models.ManyToManyField(Characteristic)
+    characteristics = models.ManyToManyField(Characteristic, blank=True)
     geom = models.MultiPolygonField(srid=3857)
 
     def __init__(self, *args, **kwargs):
@@ -44,17 +44,20 @@ class Study(models.Model):
 
     def save(self, *args, **kwargs):
         if self.pk is None:
+            super().save(*args, **kwargs)
             self.popboundary()
 
 
         elif self.geom != self._original_geom:
             # The 'geom' field has been updated
+            super().save(*args, **kwargs)
             self.popboundary()
 
-        super().save(*args, **kwargs)
+
 
     def popboundary(self):
         # Delete existing boundaries
+
         Boundary.objects.filter(study=self.id).delete()
         boundaries = []
 
