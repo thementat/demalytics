@@ -101,7 +101,7 @@ class Study(models.Model):
             bd = []
             for k in cd:
                 bd.append(BoundaryData(study=self,
-                                       boundary=Boundary.objects.get(ext_id=k['geography'][9:]),
+                                       boundary=Boundary.objects.get(ext_id=k['geography'][9:], study=self),
                                        characteristic=Characteristic.objects.get(id=k['characteristic']),
                                        value=k['value']))
 

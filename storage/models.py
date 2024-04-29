@@ -199,10 +199,16 @@ class SupplyModel(models.Model):
         StorePerimBoundary.objects.filter(supplymodel=self).delete()
         SupplyAnalysis.objects.filter(study=study).filter(supplymodel=self).delete()
 
-        weights = ModelWeights.objects.filter(supplymodel__name='SSA')
+        weights = ModelWeights.objects.filter(supplymodel=self)
         stores = Store.objects.filter(geom__within=study.geom)
         for s in stores:
-            storeperims = StorePerim.objects.filter(store=s).order_by('perim__name')
+
+            # Get Perim IDs for the given SupplyModel based on ModelWeights
+            perim_ids = ModelWeights.objects.filter(supplymodel=self).values_list('perim_id', flat=True)
+
+            # Filter StorePerim objects based on which store we're looking at and
+            # whether their perim's id is one of the ones associated with the given SupplyModel
+            storeperims = StorePerim.objects.filter(store=s, perim_id__in=perim_ids).order_by('perim__name')
 
             #create a null perimeter
             boundary = [(0, 0), (0, 1), (1, 1), (1, 0), (0, 0)]
@@ -213,14 +219,15 @@ class SupplyModel(models.Model):
             spb = []
             for p in storeperims:
                 weight = weights.get(perim=p.perim_id).weight
-                bounds = Boundary.objects.filter(
+                bounds = (Boundary.objects.filter(
+                    study=study).filter(
                     geom__intersects=p.geom).filter(~Q(
                     geom__intersects=previous_p.geom)).prefetch_related(
                         Prefetch(
                             'demandanalysis_set',
-                            queryset=DemandAnalysis.objects.filter(study=study).filter(demandmodel__name=dm.name),
+                            queryset=DemandAnalysis.objects.filter(study=study).filter(demandmodel=dm),
                             to_attr='filtered_demand_analysis'
-                        ))
+                        )))
                 agg = sum(
                         demand_analysis.demand
                         for b in bounds
@@ -433,7 +440,7 @@ class StorageStudy(Study):
                             )
         collected_geometry = Union(s_unioned_isos.unary_union, b_unioned_isos.unary_union)
 
-        # exclude boundaries that are already in teh Boundary table
+        # exclude boundaries that are already in the Boundary table
         ext_ids_to_exclude = Boundary.objects.all().values_list('ext_id', flat=True)
         bounds = (DABoundary.objects
                 .filter(geom__intersects=Transform(collected_geometry, 3347))
@@ -463,12 +470,16 @@ class StorageStudy(Study):
         d.calcDemand(study=self)
 
         # calculate the StorePerimBoundary Supply
-        sm = SupplyModel.objects.get(id=1)
+        sm = SupplyModel.objects.get(id=2)
         sm.calcSPBSupply(self)
 
 
         # Assuming StorePerimBoundary is populated, Get boundary and supplymodel pairs from StorePerimBoundary
-        queryset = StorePerimBoundary.objects.values('boundary', 'supplymodel').distinct()
+        # firsst retrieve the boundaries associates with the study
+        study_boundaries = Boundary.objects.filter(study=self).values_list('id', flat=True)
+        # then get the distinct boundary/supplymodel combinations
+        queryset = StorePerimBoundary.objects.filter(
+            boundary__in=study_boundaries).values('boundary', 'supplymodel').distinct('boundary', 'supplymodel')
 
         supply_analysis_list = []
 
@@ -485,6 +496,7 @@ class StorageStudy(Study):
             supply_analysis_list.append(supply_analysis)
 
         # Bulk create SupplyAnalysis instances
+        SupplyAnalysis.objects.filter(study=self).delete()
         SupplyAnalysis.objects.bulk_create(supply_analysis_list)
 
     def uploadDSAnalysis(self, filename='output.geojson'):
@@ -573,12 +585,13 @@ class StorageStudy(Study):
 
         studyboundaries = allboundaries.filter(geom__intersects=self.geom)
 
-        weights = ModelWeights.objects.filter(supplymodel__name='SSA')
+        weights = ModelWeights.objects.filter(supplymodel__name='CSSVS10')
+
 
         for b in studyboundaries:
 
             #retrieve the perims for this Boundary
-            perims = b.boundaryperim_set.order_by('perim__name')
+            perims = b.boundaryperim_set.filter(perim__in=weights.values_list('perim', flat=True)).order_by('perim__name')
 
             # create a null perimeter
             poly = [(0, 0), (0, 1), (1, 1), (1, 0), (0, 0)]
@@ -688,7 +701,7 @@ class StorageStudy(Study):
         recipe = {
             "version": 1,
             "layers": {
-                "residual_demand": {
+                codestring: {
                     "source": "mapbox://tileset-source/propsavant/" + codestring,
                     "minzoom": 10,
                     "maxzoom": 13
