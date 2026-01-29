@@ -12,6 +12,9 @@ docker compose exec web python manage.py migrate
 
 # Initialize baseline data
 docker compose exec web python manage.py init_data
+
+# Or include downloading DA boundaries (recommended for Canadian studies)
+docker compose exec web python manage.py init_data --download-boundaries
 ```
 
 Or use the convenience script:
@@ -44,6 +47,20 @@ The `init_data` command creates:
 
 ## Options
 
+### Download DA Boundaries
+
+Automatically download and import Canadian census boundaries from Statistics Canada:
+
+```bash
+docker compose exec web python manage.py init_data --download-boundaries
+```
+
+**Note:** 
+- This downloads a ~200MB file and may take several minutes
+- Requires internet connection
+- Only downloads if boundaries don't already exist (use `--force` to re-download)
+- The file is downloaded temporarily and extracted automatically
+
 ### Force Re-initialization
 
 To delete existing data and re-initialize:
@@ -53,6 +70,12 @@ docker compose exec web python manage.py init_data --force
 ```
 
 **Warning:** This will delete all existing PerimSets, Perims, DemandModels, SupplyModels, and Customers!
+
+To force re-download boundaries:
+
+```bash
+docker compose exec web python manage.py init_data --force --download-boundaries
+```
 
 ## Customization
 

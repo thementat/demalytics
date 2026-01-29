@@ -3,10 +3,16 @@ Management command to initialize the database with baseline data.
 
 Usage:
     python manage.py init_data
+    python manage.py init_data --download-boundaries
 """
 from django.core.management.base import BaseCommand
 from main.models import Characteristic, Customer
 from storage.models import PerimSet, Perim, DemandModel, SupplyModel, ModelWeights
+import os
+import tempfile
+import zipfile
+import requests
+from pathlib import Path
 
 
 class Command(BaseCommand):
@@ -17,6 +23,11 @@ class Command(BaseCommand):
             '--force',
             action='store_true',
             help='Force re-initialization (delete existing data)',
+        )
+        parser.add_argument(
+            '--download-boundaries',
+            action='store_true',
+            help='Download and import DA boundaries from Statistics Canada',
         )
 
     def handle(self, *args, **options):
@@ -50,6 +61,10 @@ class Command(BaseCommand):
         
         # Initialize sample Customer
         self.init_customers(force)
+        
+        # Download and import DA boundaries if requested
+        if options.get('download_boundaries'):
+            self.download_and_import_boundaries(force)
         
         # Initialize Characteristics (if you have the data)
         # self.init_characteristics(force)
@@ -187,3 +202,104 @@ class Command(BaseCommand):
             '    Characteristics initialization skipped - '
             'implement when you have the data source'
         ))
+
+    def download_and_import_boundaries(self, force=False):
+        """Download and import DA boundaries from Statistics Canada"""
+        self.stdout.write('  Downloading and importing DA boundaries...')
+        
+        if force:
+            from cacensus.models import DABoundary
+            DABoundary.objects.all().delete()
+            self.stdout.write('    Deleted existing boundaries')
+        
+        # Check if boundaries already exist
+        from cacensus.models import DABoundary
+        if DABoundary.objects.exists():
+            self.stdout.write(self.style.WARNING(
+                '    DA boundaries already exist. Use --force to re-download.'
+            ))
+            return
+        
+        # URL for the DA boundary zip file
+        url = 'https://www12.statcan.gc.ca/census-recensement/2021/geo/sip-pis/boundary-limites/files-fichiers/lda_000a21a_e.zip'
+        
+        # Create temporary directory for download and extraction
+        with tempfile.TemporaryDirectory() as temp_dir:
+            zip_path = os.path.join(temp_dir, 'lda_000a21a_e.zip')
+            extract_dir = os.path.join(temp_dir, 'extracted')
+            
+            try:
+                # Download the file
+                self.stdout.write(f'    Downloading from {url}...')
+                self.stdout.write('    This may take several minutes (file is ~200MB)...')
+                
+                response = requests.get(url, stream=True, timeout=300)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                
+                with open(zip_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                if downloaded % (10 * 1024 * 1024) == 0:  # Print every 10MB
+                                    self.stdout.write(f'    Downloaded: {percent:.1f}%')
+                
+                self.stdout.write('    Download complete')
+                
+                # Extract the zip file
+                self.stdout.write('    Extracting zip file...')
+                os.makedirs(extract_dir, exist_ok=True)
+                
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(extract_dir)
+                
+                # Find the .shp file (search recursively)
+                shp_files = list(Path(extract_dir).rglob('*.shp'))
+                if not shp_files:
+                    # List what we did find for debugging
+                    all_files = list(Path(extract_dir).rglob('*'))
+                    file_list = [str(f.relative_to(extract_dir)) for f in all_files[:20] if f.is_file()]
+                    self.stdout.write(self.style.WARNING(
+                        f'    Files found in archive (first 20): {file_list}'
+                    ))
+                    raise FileNotFoundError('No .shp file found in the zip archive')
+                
+                # Use the first .shp file found (should be lda_000a21a_e.shp)
+                shp_file_path = shp_files[0]
+                # LayerMapping expects the full path to the .shp file
+                shp_file = str(shp_file_path)
+                self.stdout.write(f'    Found shapefile: {shp_file_path.name}')
+                self.stdout.write(f'    Using path: {shp_file}')
+                
+                # Verify the .shp file exists
+                if not shp_file_path.exists():
+                    raise FileNotFoundError(f'Shapefile not found: {shp_file_path}')
+                
+                # Import the shapefile
+                self.stdout.write('    Importing boundaries into database...')
+                self.stdout.write('    This may take several minutes...')
+                
+                DABoundary.shp_import(shp_file)
+                
+                count = DABoundary.objects.count()
+                self.stdout.write(self.style.SUCCESS(
+                    f'    ✓ Imported {count} DA boundaries'
+                ))
+                
+            except requests.RequestException as e:
+                self.stdout.write(self.style.ERROR(
+                    f'    ✗ Download failed: {str(e)}'
+                ))
+                self.stdout.write(self.style.WARNING(
+                    '    You can manually download and import boundaries later'
+                ))
+            except Exception as e:
+                self.stdout.write(self.style.ERROR(
+                    f'    ✗ Import failed: {str(e)}'
+                ))
+                raise
