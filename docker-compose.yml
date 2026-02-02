@@ -35,6 +35,8 @@ services:
       - DB_NAME=demalytics
       - DB_USERNAME=postgres
       - DB_PASSWORD=postgres
+      # Mapbox API key - set in .env file (see .env.example)
+      - MB_KEY=${MB_KEY}
 
 volumes:
   postgres_data:

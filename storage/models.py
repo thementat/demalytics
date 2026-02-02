@@ -4,6 +4,7 @@ from django.contrib.gis.geos import GEOSGeometry, MultiPolygon, Polygon, Point
 from django.contrib.gis.db.models.functions import Transform, Area, AsGeoJSON, Centroid, Union
 from django.db.models import F, Q, Sum, Prefetch
 import requests, json, os
+import time
 from main.models import Boundary, BoundaryData, Study
 from mapbox.utils import Source, Tileset
 from cacensus.models import DABoundary
@@ -45,6 +46,14 @@ class Store(models.Model):
         StorePerim.objects.filter(store=self).delete()
 
         key = os.getenv('MB_KEY')
+        if not key:
+            raise ValueError(
+                "MB_KEY environment variable is not set. "
+                "Isochrone generation requires a Mapbox API key. "
+                "Please set MB_KEY in your docker-compose.yml environment section. "
+                "Get your API key from https://account.mapbox.com/access-tokens/"
+            )
+
         url = 'https://api.mapbox.com/isochrone/v1/'
         profile = 'mapbox/driving'
         coord = self.geom.transform(4326, clone=True)
@@ -53,6 +62,13 @@ class Store(models.Model):
 
         # get the times we need for models
         times = Perim.objects.filter(perimset__name='ISO').order_by('name')
+        if not times.exists():
+            raise ValueError(
+                "No Perim objects found with perimset name 'ISO'. "
+                "Please initialize perimeter data using the init_data management command: "
+                "python manage.py init_data"
+            )
+
         timestr = ''
         isos = []
         for i, t in enumerate(times, start=1):
@@ -67,11 +83,71 @@ class Store(models.Model):
                           + 'contours_minutes=' + timestr \
                           + '&polygons=true&access_token=' \
                           + key
-                response = requests.get(api_url)
+                
+                # Retry logic with exponential backoff for rate limiting
+                max_retries = 5
+                retry_delay = 1  # Start with 1 second
+                response = None
+                
+                for attempt in range(max_retries):
+                    response = requests.get(api_url)
+                    
+                    # If successful, break out of retry loop
+                    if response.status_code == 200:
+                        break
+                    
+                    # If rate limited (429), wait and retry
+                    if response.status_code == 429:
+                        if attempt < max_retries - 1:
+                            wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            # Last attempt failed
+                            error_msg = "Rate limit exceeded. Please wait and try again later."
+                            try:
+                                error_data = response.json()
+                                if 'message' in error_data:
+                                    error_msg = error_data['message']
+                            except:
+                                pass
+                            raise ValueError(
+                                f"Failed to generate isochrones for store '{self.storename}'. {error_msg}"
+                            )
+                    
+                    # For other HTTP errors, raise immediately
+                    error_msg = f"Mapbox API returned status {response.status_code}"
+                    try:
+                        error_data = response.json()
+                        if 'message' in error_data:
+                            error_msg += f": {error_data['message']}"
+                    except:
+                        error_msg += f": {response.text[:200]}"
+                    raise ValueError(
+                        f"Failed to generate isochrones for store '{self.storename}'. {error_msg}"
+                    )
+                
                 j = response.json()
+                
+                # Check for API errors in response
+                if 'error' in j:
+                    raise ValueError(
+                        f"Mapbox API error for store '{self.storename}': {j.get('message', j['error'])}"
+                    )
+                
+                # Check for features in response
+                if 'features' not in j:
+                    raise ValueError(
+                        f"Unexpected response format from Mapbox API for store '{self.storename}'. "
+                        f"Expected 'features' key. Response: {j}"
+                    )
 
                 isos = isos + j['features']
                 timestr = ''
+                
+                # Small delay between requests to avoid hitting rate limits
+                if i < len(times):
+                    time.sleep(0.5)
 
         for i, iso in enumerate(isos):
             g = GEOSGeometry(json.dumps(iso['geometry']))
@@ -156,7 +232,15 @@ class Store(models.Model):
                           companytype=data['CompanyType']
                           )
                 s.geom.transform(3857)
-                s.save()
+                try:
+                    s.save()
+                except ValueError as e:
+                    store_name = data.get('StoreName', 'Unknown')
+                    store_id = data.get('StoreID', 'Unknown')
+                    raise ValueError(
+                        f"Failed to save store '{store_name}' (ID: {store_id}): {str(e)}\n"
+                        "Store was not saved. Please fix the issue and try again."
+                    ) from e
 
 
 class PerimSet(models.Model):
@@ -390,11 +474,71 @@ class StorageBoundary(Boundary):
                           + 'contours_minutes=' + timestr \
                           + '&polygons=true&access_token=' \
                           + key
-                response = requests.get(api_url)
+                
+                # Retry logic with exponential backoff for rate limiting
+                max_retries = 5
+                retry_delay = 1  # Start with 1 second
+                response = None
+                
+                for attempt in range(max_retries):
+                    response = requests.get(api_url)
+                    
+                    # If successful, break out of retry loop
+                    if response.status_code == 200:
+                        break
+                    
+                    # If rate limited (429), wait and retry
+                    if response.status_code == 429:
+                        if attempt < max_retries - 1:
+                            wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            # Last attempt failed
+                            error_msg = "Rate limit exceeded. Please wait and try again later."
+                            try:
+                                error_data = response.json()
+                                if 'message' in error_data:
+                                    error_msg = error_data['message']
+                            except:
+                                pass
+                            raise ValueError(
+                                f"Failed to generate isochrones for boundary '{self.name}'. {error_msg}"
+                            )
+                    
+                    # For other HTTP errors, raise immediately
+                    error_msg = f"Mapbox API returned status {response.status_code}"
+                    try:
+                        error_data = response.json()
+                        if 'message' in error_data:
+                            error_msg += f": {error_data['message']}"
+                    except:
+                        error_msg += f": {response.text[:200]}"
+                    raise ValueError(
+                        f"Failed to generate isochrones for boundary '{self.name}'. {error_msg}"
+                    )
+                
                 j = response.json()
+                
+                # Check for API errors in response
+                if 'error' in j:
+                    raise ValueError(
+                        f"Mapbox API error for boundary '{self.name}': {j.get('message', j['error'])}"
+                    )
+                
+                # Check for features in response
+                if 'features' not in j:
+                    raise ValueError(
+                        f"Unexpected response format from Mapbox API for boundary '{self.name}'. "
+                        f"Expected 'features' key. Response: {j}"
+                    )
 
                 isos = isos + j['features']
                 timestr = ''
+                
+                # Small delay between requests to avoid hitting rate limits
+                if i < len(times):
+                    time.sleep(0.5)
 
         for i, iso in enumerate(isos):
             g = GEOSGeometry(json.dumps(iso['geometry']))
