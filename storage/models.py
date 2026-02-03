@@ -566,12 +566,36 @@ class StorageStudy(Study):
 
 
     def addBoundaries(self):
+        """
+        Adds additional boundaries to the study based on store and boundary isochrones.
+        
+        This method finds census boundaries (DABoundary) that intersect with:
+        - Store isochrones (StorePerim) for stores within the study area
+        - Boundary isochrones (BoundaryPerim) for boundaries within the study area
+        
+        Prerequisites:
+        1. Stores must exist within the study geometry (with StorePerim objects)
+        2. Boundaries must exist within the study geometry (with BoundaryPerim objects)  
+        3. DABoundary objects must be loaded in the database
+        
+        If no StorePerim or BoundaryPerim objects exist, this method returns early
+        (nothing to add). This is normal if:
+        - Stores haven't been imported yet
+        - Stores haven't generated isochrones yet (requires MB_KEY)
+        - Boundaries haven't generated isochrones yet
+        """
         # The Study geometry contains several Boundaries, however, our analysis also requires the Boundaries that are
         # contained by the StorePerims and BoundaryPerims.  This function adds those boundaries.
 
         # TODO: add other boundaries extending from the perimeters from the existing boundaries and other Stores
         stores_within_geometry = Store.objects.filter(geom__within=self.geom)
         boundarys_within_geometry = Boundary.objects.filter(geom__within=self.geom)
+        
+        # Check if we have stores and boundaries to work with
+        if not stores_within_geometry.exists() and not boundarys_within_geometry.exists():
+            # No stores or boundaries in study area - nothing to do
+            return
+        
         s_unioned_isos = (StorePerim.objects
                             .filter(store__in=stores_within_geometry)
                             .aggregate(unioned_geoms=Collect('geom')
@@ -582,8 +606,35 @@ class StorageStudy(Study):
                             .aggregate(unioned_geoms=Collect('geom')
                             )['unioned_geoms']
                             )
-        collected_geometry = Union(s_unioned_isos.unary_union, b_unioned_isos.unary_union)
+        
+        # Handle None values - Collect returns None if no geometries found
+        geometries_to_union = []
+        if s_unioned_isos is not None:
+            geometries_to_union.append(s_unioned_isos.unary_union)
+        if b_unioned_isos is not None:
+            geometries_to_union.append(b_unioned_isos.unary_union)
+        
+        # If no geometries found, return early (nothing to add)
+        # This happens when:
+        # - Stores exist but haven't generated isochrones (StorePerim) yet
+        # - Boundaries exist but haven't generated isochrones (BoundaryPerim) yet
+        if not geometries_to_union:
+            return
+        
+        # Union all geometries
+        if len(geometries_to_union) == 1:
+            collected_geometry = geometries_to_union[0]
+        else:
+            collected_geometry = Union(geometries_to_union[0], geometries_to_union[1])
 
+        # Check if DABoundary objects exist (required for Canadian studies)
+        if not DABoundary.objects.exists():
+            raise ValueError(
+                "No DABoundary objects found in database. "
+                "Please load census boundaries first using: "
+                "python manage.py init_data --download-boundaries"
+            )
+        
         # exclude boundaries that are already in the Boundary table
         ext_ids_to_exclude = Boundary.objects.all().values_list('ext_id', flat=True)
         bounds = (DABoundary.objects
@@ -602,6 +653,10 @@ class StorageStudy(Study):
     def processStudy(self):
         # This calculates the demand & supply for a Study object.
 
+        # Generate isochrones for existing boundaries (if they don't have them)
+        # This ensures addBoundaries() can use boundary isochrones to find additional boundaries
+        self.addPerims()
+
         # add the new boundaries
         self.addBoundaries()
 
@@ -614,7 +669,7 @@ class StorageStudy(Study):
         d.calcDemand(study=self)
 
         # calculate the StorePerimBoundary Supply
-        sm = SupplyModel.objects.get(id=2)
+        sm = SupplyModel.objects.get(name='CSSVS10')
         sm.calcSPBSupply(self)
 
 
