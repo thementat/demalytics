@@ -660,3 +660,9 @@ study.processStudy()
 - **Django Shell**: `docker compose exec web python manage.py shell`
 - **Database Access**: `docker compose exec db psql -U postgres -d demalytics`
 - **Container Logs**: `docker compose logs -f web`
+
+from storage.models import StorageStudy, DemandModel, SupplyModel
+study = StorageStudy.objects.get(name='Colwood')
+demand_model = DemandModel.objects.get(name='CSSVS')
+supply_model = SupplyModel.objects.get(name='CSSVS10')
+style_url = study.uploadStudyStyle(demand_model, supply_model, overwrite=False)

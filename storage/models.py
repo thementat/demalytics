@@ -5,6 +5,8 @@ from django.contrib.gis.db.models.functions import Transform, Area, AsGeoJSON, C
 from django.db.models import F, Q, Sum, Prefetch
 import requests, json, os
 import time
+import math
+import re
 from main.models import Boundary, BoundaryData, Study
 from mapbox.utils import Source, Tileset
 from cacensus.models import DABoundary
@@ -18,6 +20,32 @@ from django.dispatch import receiver
 
 
 # Create your models here.
+
+def sanitize_style_name(name: str) -> str:
+    """
+    Sanitize a style name to comply with Mapbox naming requirements.
+    - Lowercase
+    - Replace spaces with underscores
+    - Remove special characters (keep alphanumeric, underscore, hyphen)
+    - Max length: 64 characters
+    - Ensure it starts with alphanumeric
+    """
+    # Convert to lowercase
+    sanitized = name.lower()
+    # Replace spaces with underscores
+    sanitized = sanitized.replace(' ', '_')
+    # Remove special characters, keep alphanumeric, underscore, hyphen
+    sanitized = re.sub(r'[^a-z0-9_-]', '', sanitized)
+    # Ensure it starts with alphanumeric
+    if sanitized and not sanitized[0].isalnum():
+        sanitized = 'a' + sanitized
+    # Truncate to max 64 characters
+    if len(sanitized) > 64:
+        sanitized = sanitized[:64]
+    # Ensure it's not empty
+    if not sanitized:
+        sanitized = 'style'
+    return sanitized
 class Store(models.Model):
     masterid = models.IntegerField(primary_key=True)
     storeid = models.IntegerField()
@@ -786,6 +814,14 @@ class StorageStudy(Study):
 
         weights = ModelWeights.objects.filter(supplymodel__name='CSSVS10')
 
+        # Get the ISO PerimSet for creating the null perimeter
+        try:
+            iso_perimset = PerimSet.objects.get(name='ISO')
+        except PerimSet.DoesNotExist:
+            raise ValueError(
+                "ISO PerimSet not found. Please initialize the database using: "
+                "python manage.py init_data"
+            )
 
         for b in studyboundaries:
 
@@ -795,7 +831,7 @@ class StorageStudy(Study):
             # create a null perimeter
             poly = [(0, 0), (0, 1), (1, 1), (1, 0), (0, 0)]
             previous_p = BoundaryPerim(boundary=b,
-                                    perim=Perim(perimset=PerimSet.objects.get(id=1), name='blank'),
+                                    perim=Perim(perimset=iso_perimset, name='blank'),
                                     geom=MultiPolygon(Polygon(poly))
                                     )
 
@@ -848,7 +884,99 @@ class StorageStudy(Study):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def uploadBAnalysis(self, demandmodel, supplymodel):
+    def _tileset_exists(self, tileset_id: str) -> bool:
+        """Check if a tileset exists in Mapbox."""
+        key = os.getenv('MB_KEY')
+        if not key:
+            return False
+        
+        username = 'propsavant'
+        url = f'https://api.mapbox.com/tilesets/v1/{username}.{tileset_id}?access_token={key}'
+        response = requests.get(url)
+        return response.status_code == 200
+
+    def _get_tileset_info(self, tileset_id: str) -> dict:
+        """Get tileset information from Mapbox API."""
+        key = os.getenv('MB_KEY')
+        if not key:
+            raise ValueError("MB_KEY not set")
+        
+        username = 'propsavant'
+        url = f'https://api.mapbox.com/tilesets/v1/{username}.{tileset_id}?access_token={key}'
+        response = requests.get(url)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f'Failed to get tileset info: {response.text}')
+
+    def _verify_tileset_accessible(self, tileset_url: str) -> bool:
+        """Verify that a tileset URL is accessible by trying to get tile metadata."""
+        # Try to access the tileset via the tileset API to verify it's accessible
+        # Extract tileset ID from URL (format: mapbox://tilesets/username.tileset_id)
+        if not tileset_url.startswith('mapbox://tilesets/'):
+            return False
+        
+        tileset_identifier = tileset_url.replace('mapbox://tilesets/', '')
+        parts = tileset_identifier.split('.', 1)
+        if len(parts) != 2:
+            return False
+        
+        username, tileset_id = parts
+        return self._tileset_exists(tileset_id)
+
+    def _wait_for_tileset_ready(self, tileset_id: str, max_wait_minutes: int = 10) -> bool:
+        """
+        Wait for a tileset to be fully processed and ready.
+        Returns True if tileset is ready, False if timeout.
+        """
+        key = os.getenv('MB_KEY')
+        if not key:
+            return False
+        
+        username = 'propsavant'
+        max_wait_seconds = max_wait_minutes * 60
+        check_interval = 10  # Check every 10 seconds
+        elapsed = 0
+        
+        while elapsed < max_wait_seconds:
+            url = f'https://api.mapbox.com/tilesets/v1/{username}.{tileset_id}?access_token={key}'
+            response = requests.get(url)
+            
+            if response.status_code == 200:
+                tileset_data = response.json()
+                # Check if tileset is complete/ready
+                # Mapbox tilesets have a 'latest' job that shows status
+                if 'latest' in tileset_data:
+                    job = tileset_data['latest']
+                    status = job.get('status', '')
+                    if status == 'complete':
+                        return True
+                    elif status in ['failed', 'cancelled']:
+                        raise Exception(f"Tileset {tileset_id} processing failed with status: {status}")
+                    # Otherwise, still processing (pending, processing, etc.)
+                else:
+                    # If no 'latest' job, assume it's ready
+                    return True
+            
+            time.sleep(check_interval)
+            elapsed += check_interval
+        
+        # Timeout - tileset not ready
+        return False
+
+    def _source_exists(self, source_id: str) -> bool:
+        """Check if a source exists in Mapbox."""
+        key = os.getenv('MB_KEY')
+        if not key:
+            return False
+        
+        username = 'propsavant'
+        url = f'https://api.mapbox.com/tilesets/v1/sources/{username}/{source_id}?access_token={key}'
+        response = requests.get(url)
+        return response.status_code == 200
+
+    def uploadBAnalysis(self, demandmodel, supplymodel, overwrite=False):
         # This uploads the Study Analysis to mapbox
 
         codestring = ('BA'
@@ -890,8 +1018,39 @@ class StorageStudy(Study):
             for row in rows
         ]).encode('utf-8')
 
+        # Check if tileset/source exists
+        if not overwrite and self._tileset_exists(codestring):
+            # Even if tileset exists, ensure it's published and ready
+            t = Tileset(codestring, 'propsavant', os.getenv('MB_KEY'))
+            try:
+                t.publish()  # Re-publish to ensure it's available
+                # Wait for tileset to be fully processed
+                print(f"Waiting for existing tileset '{codestring}' to be ready...")
+                if not self._wait_for_tileset_ready(codestring, max_wait_minutes=10):
+                    raise Exception(
+                        f"Tileset '{codestring}' did not become ready within 10 minutes. "
+                        "Please check the tileset status in Mapbox."
+                    )
+                print(f"Tileset '{codestring}' is ready.")
+            except Exception as e:
+                # If publish/ready check fails, raise the error
+                raise Exception(f"Failed to ensure tileset '{codestring}' is ready: {str(e)}")
+            return  # Skip upload if exists and overwrite is False
 
-
+        # Delete existing tileset and source if overwrite is True
+        if overwrite:
+            if self._tileset_exists(codestring):
+                t = Tileset(codestring, 'propsavant', os.getenv('MB_KEY'))
+                try:
+                    t.delete()
+                except:
+                    pass  # Ignore errors if deletion fails
+            if self._source_exists(codestring):
+                s = Source(codestring, 'propsavant', os.getenv('MB_KEY'))
+                try:
+                    s.delete()
+                except:
+                    pass  # Ignore errors if deletion fails
 
         s = Source(codestring, 'propsavant', os.getenv('MB_KEY'))
         s.upload(codestring, geojson_ndjson_str)
@@ -908,12 +1067,19 @@ class StorageStudy(Study):
             }
         }
 
-
-
         t.create(recipe, codestring)
         t.publish()
+        
+        # Wait for tileset to be fully processed (can take several minutes)
+        print(f"Waiting for tileset '{codestring}' to be processed...")
+        if not self._wait_for_tileset_ready(codestring, max_wait_minutes=10):
+            raise Exception(
+                f"Tileset '{codestring}' did not complete processing within 10 minutes. "
+                "Please check the tileset status in Mapbox and try again later."
+            )
+        print(f"Tileset '{codestring}' is ready.")
 
-    def uploadStores(self):
+    def uploadStores(self, overwrite=False):
         # This uploads the Study Analysis to mapbox
 
         codestring = ('ST'
@@ -948,6 +1114,40 @@ class StorageStudy(Study):
             for row in rows
         ]).encode('utf-8')
 
+        # Check if tileset/source exists
+        if not overwrite and self._tileset_exists(codestring):
+            # Even if tileset exists, ensure it's published and ready
+            t = Tileset(codestring, 'propsavant', os.getenv('MB_KEY'))
+            try:
+                t.publish()  # Re-publish to ensure it's available
+                # Wait for tileset to be fully processed
+                print(f"Waiting for existing tileset '{codestring}' to be ready...")
+                if not self._wait_for_tileset_ready(codestring, max_wait_minutes=10):
+                    raise Exception(
+                        f"Tileset '{codestring}' did not become ready within 10 minutes. "
+                        "Please check the tileset status in Mapbox."
+                    )
+                print(f"Tileset '{codestring}' is ready.")
+            except Exception as e:
+                # If publish/ready check fails, raise the error
+                raise Exception(f"Failed to ensure tileset '{codestring}' is ready: {str(e)}")
+            return  # Skip upload if exists and overwrite is False
+
+        # Delete existing tileset and source if overwrite is True
+        if overwrite:
+            if self._tileset_exists(codestring):
+                t = Tileset(codestring, 'propsavant', os.getenv('MB_KEY'))
+                try:
+                    t.delete()
+                except:
+                    pass  # Ignore errors if deletion fails
+            if self._source_exists(codestring):
+                s = Source(codestring, 'propsavant', os.getenv('MB_KEY'))
+                try:
+                    s.delete()
+                except:
+                    pass  # Ignore errors if deletion fails
+
         s = Source(codestring, 'propsavant', os.getenv('MB_KEY'))
         s.upload(codestring, geojson_ndjson_str)
         t = Tileset(codestring, 'propsavant', os.getenv('MB_KEY'))
@@ -965,7 +1165,465 @@ class StorageStudy(Study):
 
         t.create(recipe, codestring)
         t.publish()
+        
+        # Wait for tileset to be fully processed (can take several minutes)
+        print(f"Waiting for tileset '{codestring}' to be processed...")
+        if not self._wait_for_tileset_ready(codestring, max_wait_minutes=10):
+            raise Exception(
+                f"Tileset '{codestring}' did not complete processing within 10 minutes. "
+                "Please check the tileset status in Mapbox and try again later."
+            )
+        print(f"Tileset '{codestring}' is ready.")
 
+    def _resolve_style_id(self, style_identifier: str) -> str:
+        """
+        Resolve a style identifier (name or ID) to a style ID.
+        If it looks like an ID (long alphanumeric), use it directly.
+        Otherwise, search for a style with matching name.
+        """
+        # Style IDs are typically long alphanumeric strings (20+ chars)
+        # If it looks like an ID, use it directly
+        if len(style_identifier) > 15 and style_identifier.replace('_', '').replace('-', '').isalnum():
+            return style_identifier
+        
+        # Otherwise, treat it as a name and search for it
+        key = os.getenv('MB_KEY')
+        if not key:
+            raise ValueError(
+                "MB_KEY environment variable is not set. "
+                "Please set MB_KEY in your docker-compose.yml environment section."
+            )
+        
+        username = 'propsavant'
+        url = f'https://api.mapbox.com/styles/v1/{username}?access_token={key}'
+        response = requests.get(url)
+        
+        if not response.ok:
+            raise Exception(f'Failed to list styles: {response.text}')
+        
+        styles = response.json()
+        # Search for style with matching name
+        for style in styles:
+            if style.get('name') == style_identifier or style.get('id') == style_identifier:
+                return style.get('id')
+        
+        raise ValueError(
+            f"Style '{style_identifier}' not found. "
+            f"Available styles: {[s.get('name', s.get('id')) for s in styles]}"
+        )
+
+    def _get_mapbox_style(self, style_identifier: str) -> dict:
+        """
+        Retrieve a Mapbox style by ID or name.
+        If style_identifier looks like a name, it will be resolved to an ID first.
+        """
+        # Resolve to style ID (handles both name and ID)
+        style_id = self._resolve_style_id(style_identifier)
+        
+        key = os.getenv('MB_KEY')
+        if not key:
+            raise ValueError(
+                "MB_KEY environment variable is not set. "
+                "Please set MB_KEY in your docker-compose.yml environment section."
+            )
+        
+        username = 'propsavant'
+        url = f'https://api.mapbox.com/styles/v1/{username}/{style_id}?access_token={key}'
+        response = requests.get(url)
+        
+        if response.status_code == 404:
+            raise ValueError(f"Template style '{style_identifier}' (ID: {style_id}) not found in Mapbox account.")
+        elif not response.ok:
+            raise Exception(f'Failed to retrieve style: {response.text}')
+        
+        return response.json()
+
+    def _style_exists(self, style_name: str):
+        """
+        Check if a style exists in Mapbox by name.
+        Returns: (exists: bool, style_id: str or None)
+        """
+        key = os.getenv('MB_KEY')
+        if not key:
+            raise ValueError(
+                "MB_KEY environment variable is not set. "
+                "Please set MB_KEY in your docker-compose.yml environment section."
+            )
+        
+        username = 'propsavant'
+        url = f'https://api.mapbox.com/styles/v1/{username}?access_token={key}'
+        response = requests.get(url)
+        
+        if not response.ok:
+            raise Exception(f'Failed to list styles: {response.text}')
+        
+        styles = response.json()
+        # Check if style with matching name exists
+        for style in styles:
+            if style.get('name') == style_name:
+                return (True, style.get('id'))
+        return (False, None)
+
+    def _create_mapbox_style(self, style_name: str, style_json: dict) -> str:
+        """
+        Create a new Mapbox style and return its URL.
+        Note: Mapbox generates the style ID automatically, we can only set the name.
+        """
+        key = os.getenv('MB_KEY')
+        if not key:
+            raise ValueError(
+                "MB_KEY environment variable is not set. "
+                "Please set MB_KEY in your docker-compose.yml environment section."
+            )
+        
+        username = 'propsavant'
+        
+        # Ensure the style JSON has the name set
+        style_json['name'] = style_name
+        
+        # POST to create new style - Mapbox generates the ID
+        create_url = f'https://api.mapbox.com/styles/v1/{username}?access_token={key}'
+        create_response = requests.post(
+            create_url,
+            headers={'Content-Type': 'application/json'},
+            data=json.dumps(style_json)
+        )
+        
+        if not create_response.ok:
+            error_text = create_response.text
+            # Try to extract which source is causing the issue
+            try:
+                error_json = create_response.json()
+                message = error_json.get('message', error_text)
+                if 'sources[' in message:
+                    # Extract source index
+                    import re
+                    match = re.search(r'sources\[(\d+)\]', message)
+                    if match:
+                        source_idx = int(match.group(1))
+                        source_names = list(new_style.get('sources', {}).keys())
+                        if source_idx < len(source_names):
+                            source_name = source_names[source_idx]
+                            source_url = new_style['sources'][source_name].get('url', 'unknown')
+                            raise Exception(
+                                f'Failed to create style: {message}\n'
+                                f'Problematic source: {source_name} with URL: {source_url}\n'
+                                f'Please verify this tileset exists and is fully processed in Mapbox.'
+                            )
+            except:
+                pass
+            raise Exception(f'Failed to create style: {error_text}')
+        
+        # Get the style ID from the response
+        created_style = create_response.json()
+        # Mapbox returns the style in different formats, try to get the ID
+        actual_style_id = created_style.get('id') or created_style.get('style_id')
+        
+        if not actual_style_id:
+            # If ID not in response, try to extract from the 'owner' field or other structure
+            # Sometimes the response is just the style JSON with an 'id' at root
+            if 'id' in created_style:
+                actual_style_id = created_style['id']
+            else:
+                raise Exception(f'Could not determine style ID from response: {created_style}')
+        
+        return f'mapbox://styles/{username}/{actual_style_id}'
+
+    def _update_mapbox_style(self, style_id: str, style_json: dict) -> str:
+        """Update an existing Mapbox style and return its URL."""
+        key = os.getenv('MB_KEY')
+        if not key:
+            raise ValueError(
+                "MB_KEY environment variable is not set. "
+                "Please set MB_KEY in your docker-compose.yml environment section."
+            )
+        
+        username = 'propsavant'
+        url = f'https://api.mapbox.com/styles/v1/{username}/{style_id}?access_token={key}'
+        response = requests.put(
+            url,
+            headers={'Content-Type': 'application/json'},
+            data=json.dumps(style_json)
+        )
+        
+        if not response.ok:
+            raise Exception(f'Failed to update style: {response.text}')
+        
+        return f'mapbox://styles/{username}/{style_id}'
+
+    def _calculate_store_circle_radius(self, min_sqft: float, max_sqft: float) -> list:
+        """
+        Calculate circle radius expression for Mapbox using square root scaling.
+        Returns a Mapbox expression list.
+        """
+        min_radius = 3
+        max_radius = 15
+        
+        if max_sqft == min_sqft:
+            return min_radius
+        
+        # Square root scaling: min_radius + sqrt((sqft - min_sqft) / (max_sqft - min_sqft)) * (max_radius - min_radius)
+        return [
+            '+',
+            min_radius,
+            [
+                '*',
+                ['-', max_radius, min_radius],
+                [
+                    'sqrt',
+                    [
+                        '/',
+                        ['-', ['get', 'rentablesqft'], min_sqft],
+                        ['-', max_sqft, min_sqft]
+                    ]
+                ]
+            ]
+        ]
+
+    def _get_residual_color_expression(self, max_residual: float) -> list:
+        """
+        Get Mapbox color expression for residual gradient.
+        Red (negative) -> White (0) -> Green (positive)
+        Returns a Mapbox interpolate expression.
+        """
+        if max_residual == 0:
+            return 'white'
+        
+        return [
+            'interpolate',
+            ['linear'],
+            ['get', 'residual'],
+            -max_residual, 'red',
+            0, 'white',
+            max_residual, 'green'
+        ]
+
+    def uploadStudyStyle(self, demandmodel, supplymodel, template_style_id='Surrey-copy', overwrite=False) -> str:
+        # TODO: create a new template style
+        
+        """
+        Upload stores and BAnalysis to Mapbox and create/update a style with both layers.
+        
+        Args:
+            demandmodel: DemandModel instance
+            supplymodel: SupplyModel instance
+            template_style_id: Style ID or name to use as template (default: 'Surrey-copy')
+                              Can be either the style name (e.g., 'Surrey-copy') or style ID
+            overwrite: If True, overwrite existing tilesets. If False, skip if tilesets exist (default: False)
+        
+        Returns:
+            Style URL (mapbox://styles/username/style_id)
+        """
+        # Validate inputs
+        if not demandmodel or not supplymodel:
+            raise ValueError("demandmodel and supplymodel are required")
+        
+        # Check if BoundaryAnalysis exists, call calcAnalysis if not
+        boundary_analysis_exists = BoundaryAnalysis.objects.filter(
+            study=self,
+            demandmodel=demandmodel,
+            supplymodel=supplymodel
+        ).exists()
+        
+        if not boundary_analysis_exists:
+            self.calcAnalysis()
+        
+        # Verify BoundaryAnalysis was created
+        if not BoundaryAnalysis.objects.filter(
+            study=self,
+            demandmodel=demandmodel,
+            supplymodel=supplymodel
+        ).exists():
+            raise ValueError(
+                f"No BoundaryAnalysis data found for study '{self.name}' "
+                f"with demandmodel '{demandmodel.name}' and supplymodel '{supplymodel.name}'. "
+                "calcAnalysis() was called but did not produce results."
+            )
+        
+        # Upload stores and BAnalysis
+        self.uploadStores(overwrite=overwrite)
+        self.uploadBAnalysis(demandmodel, supplymodel, overwrite=overwrite)
+        
+        # Build tileset source names (needed for validation)
+        stores_codestring = f'ST_s{self.id}'
+        ba_codestring = f'BA_s{self.id}_dm{demandmodel.id}_sm{supplymodel.id}'
+        
+        # Verify tilesets exist and are ready
+        print(f"Verifying tilesets are ready...")
+        if not self._tileset_exists(stores_codestring):
+            raise ValueError(
+                f"Stores tileset '{stores_codestring}' does not exist. "
+                "Please ensure uploadStores() completed successfully."
+            )
+        if not self._tileset_exists(ba_codestring):
+            raise ValueError(
+                f"BAnalysis tileset '{ba_codestring}' does not exist. "
+                "Please ensure uploadBAnalysis() completed successfully."
+            )
+        
+        # Wait for both tilesets to be fully processed (they should already be ready from upload)
+        # But double-check in case they're still processing
+        print(f"Ensuring tilesets are fully processed...")
+        if not self._wait_for_tileset_ready(stores_codestring, max_wait_minutes=5):
+            print(f"Warning: Stores tileset '{stores_codestring}' may still be processing.")
+        if not self._wait_for_tileset_ready(ba_codestring, max_wait_minutes=5):
+            print(f"Warning: BAnalysis tileset '{ba_codestring}' may still be processing.")
+        
+        # Generate style name
+        style_name = sanitize_style_name(f"{self.name}_dm{demandmodel.name}_sm{supplymodel.name}")
+        
+        # Get template style
+        template_style = self._get_mapbox_style(template_style_id)
+        
+        # Calculate min/max rentablesqft from stores in study
+        stores = Store.objects.filter(geom__intersects=self.geom).exclude(rentablesqft__isnull=True)
+        if not stores.exists():
+            raise ValueError(f"No stores found in study '{self.name}'")
+        
+        rentablesqft_values = stores.values_list('rentablesqft', flat=True)
+        min_sqft = min(rentablesqft_values)
+        max_sqft = max(rentablesqft_values)
+        
+        # Calculate max absolute residual from BoundaryAnalysis
+        residuals = BoundaryAnalysis.objects.filter(
+            study=self,
+            demandmodel=demandmodel,
+            supplymodel=supplymodel
+        ).values_list('residual', flat=True)
+        
+        if not residuals:
+            raise ValueError(
+                f"No residual data found for study '{self.name}' "
+                f"with demandmodel '{demandmodel.name}' and supplymodel '{supplymodel.name}'"
+            )
+        
+        max_residual = max(abs(r) for r in residuals)
+        
+        # Create new style JSON based on template
+        new_style = template_style.copy()
+        
+        # Update or add sources
+        if 'sources' not in new_style:
+            new_style['sources'] = {}
+        
+        # Get actual tileset info from Mapbox to verify format and accessibility
+        try:
+            stores_info = self._get_tileset_info(stores_codestring)
+            ba_info = self._get_tileset_info(ba_codestring)
+            
+            print(f"Stores tileset info: {json.dumps(stores_info, indent=2)}")
+            print(f"BAnalysis tileset info: {json.dumps(ba_info, indent=2)}")
+            
+            # Use the full tileset ID directly from Mapbox API response
+            # The ID already includes username (e.g., "propsavant.ST_s1")
+            stores_full_id = stores_info.get('id', f'propsavant.{stores_codestring}')
+            ba_full_id = ba_info.get('id', f'propsavant.{ba_codestring}')
+            
+            # Format: mapbox://{full_tileset_id} (for use as style source URL)
+            # Use the exact ID from Mapbox, which already includes username
+            stores_tileset_url = f'mapbox://{stores_full_id}'
+            ba_tileset_url = f'mapbox://{ba_full_id}'
+            
+            print(f"Using stores tileset URL: {stores_tileset_url}")
+            print(f"Using BAnalysis tileset URL: {ba_tileset_url}")
+            
+            # Add a small delay to ensure tilesets are fully accessible
+            print("Waiting a moment for tilesets to be fully accessible...")
+            time.sleep(5)
+            
+        except Exception as e:
+            # Fallback to our constructed URLs if API call fails
+            print(f"Warning: Could not get tileset info from API: {e}")
+            stores_tileset_url = f'mapbox://propsavant.{stores_codestring}'
+            ba_tileset_url = f'mapbox://propsavant.{ba_codestring}'
+            print(f"Using fallback stores tileset URL: {stores_tileset_url}")
+            print(f"Using fallback BAnalysis tileset URL: {ba_tileset_url}")
+            time.sleep(5)
+        
+        new_style['sources']['stores'] = {
+            'type': 'vector',
+            'url': stores_tileset_url
+        }
+        new_style['sources']['boundary-analysis'] = {
+            'type': 'vector',
+            'url': ba_tileset_url
+        }
+        
+        # Build layers
+        new_layers = []
+        
+        # Get the actual source-layer ID from the tileset info
+        # The source-layer must match the vector layer ID in the tileset
+        try:
+            ba_info = self._get_tileset_info(ba_codestring)
+            # Get the vector layer ID from the tileset
+            if 'vector_layers' in ba_info and len(ba_info['vector_layers']) > 0:
+                ba_source_layer_id = ba_info['vector_layers'][0]['id']
+                print(f"Using BAnalysis source-layer ID: {ba_source_layer_id}")
+            else:
+                ba_source_layer_id = ba_codestring
+                print(f"Warning: No vector_layers found, using codestring: {ba_source_layer_id}")
+        except:
+            ba_source_layer_id = ba_codestring
+            print(f"Warning: Could not get tileset info, using codestring: {ba_source_layer_id}")
+        
+        # BAnalysis layer (fill) - add first (below)
+        ba_layer = {
+            'id': 'boundary-analysis',
+            'type': 'fill',
+            'source': 'boundary-analysis',
+            'source-layer': ba_source_layer_id,
+            'paint': {
+                'fill-color': self._get_residual_color_expression(max_residual),
+                'fill-opacity': 0.7
+            }
+        }
+        new_layers.append(ba_layer)
+        
+        # Stores layer (circle) - add second (on top)
+        stores_layer = {
+            'id': 'stores',
+            'type': 'circle',
+            'source': 'stores',
+            'source-layer': 'stores',
+            'paint': {
+                'circle-radius': self._calculate_store_circle_radius(min_sqft, max_sqft),
+                'circle-color': '#000000',
+                'circle-stroke-width': 1,
+                'circle-stroke-color': '#ffffff'
+            }
+        }
+        new_layers.append(stores_layer)
+        
+        # Add new layers to existing layers (preserve template layers, add ours on top)
+        if 'layers' not in new_style:
+            new_style['layers'] = []
+        
+        # Remove existing layers with the same IDs if they exist (to avoid duplicates)
+        existing_layer_ids = {layer.get('id') for layer in new_style['layers']}
+        layers_to_remove = {'boundary-analysis', 'stores'}
+        
+        # Remove existing layers with our IDs
+        new_style['layers'] = [
+            layer for layer in new_style['layers'] 
+            if layer.get('id') not in layers_to_remove
+        ]
+        
+        # Insert our layers before the last layer (or at the end)
+        # This ensures BAnalysis is below and Stores is on top
+        new_style['layers'].extend(new_layers)
+        
+        # Check if style exists and create or update
+        style_exists, existing_style_id = self._style_exists(style_name)
+        
+        if style_exists:
+            # Update existing style using its actual ID
+            style_url = self._update_mapbox_style(existing_style_id, new_style)
+        else:
+            # Create new style (Mapbox will generate the ID)
+            style_url = self._create_mapbox_style(style_name, new_style)
+        
+        return style_url
 
     def save(self, *args, **kwargs):
         # check if this instance already exists in the database
