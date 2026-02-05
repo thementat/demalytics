@@ -1,0 +1,343 @@
+/* Demalytics - Storage Market Analysis Styles */
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    background-color: #f5f5f5;
+    color: #333;
+    line-height: 1.5;
+}
+
+/* Header */
+header {
+    background-color: #1a1a2e;
+    color: white;
+    padding: 1rem 2rem;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+}
+
+/* Main Layout */
+main {
+    display: flex;
+    height: calc(100vh - 60px);
+}
+
+/* Control Panel (Sidebar) */
+#control-panel {
+    width: 350px;
+    min-width: 350px;
+    padding: 1.5rem;
+    background-color: white;
+    overflow-y: auto;
+    border-right: 1px solid #e0e0e0;
+}
+
+#control-panel h2 {
+    font-size: 1.25rem;
+    margin-bottom: 1rem;
+    color: #1a1a2e;
+}
+
+#control-panel h3 {
+    font-size: 1rem;
+    margin-bottom: 0.5rem;
+    color: #444;
+}
+
+#control-panel hr {
+    border: none;
+    border-top: 1px solid #e0e0e0;
+    margin: 1.5rem 0;
+}
+
+/* Form Styles */
+.form-group {
+    margin-bottom: 1rem;
+}
+
+.form-group label {
+    display: block;
+    font-weight: 500;
+    margin-bottom: 0.25rem;
+    color: #555;
+}
+
+.form-group input[type="text"],
+.form-group textarea,
+.form-group select {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 0.95rem;
+    transition: border-color 0.2s;
+}
+
+.form-group input[type="text"]:focus,
+.form-group textarea:focus,
+.form-group select:focus {
+    outline: none;
+    border-color: #4a90d9;
+    box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.2);
+}
+
+.form-group input:disabled,
+.form-group textarea:disabled,
+.form-group select:disabled {
+    background-color: #f5f5f5;
+    cursor: not-allowed;
+}
+
+.help-text {
+    font-size: 0.85rem;
+    color: #777;
+    margin-bottom: 0.5rem;
+}
+
+/* Radio Group */
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: normal;
+    cursor: pointer;
+}
+
+.radio-label input[type="radio"] {
+    margin: 0;
+}
+
+/* Status Box */
+.status-box {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    background-color: #f8f9fa;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.status-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+.status-indicator.ready {
+    background-color: #28a745;
+}
+
+.status-indicator.not-ready {
+    background-color: #dc3545;
+}
+
+/* Button Styles */
+.button-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
+
+button {
+    padding: 0.75rem 1rem;
+    font-size: 0.95rem;
+    font-weight: 500;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.2s, transform 0.1s;
+}
+
+button:active {
+    transform: translateY(1px);
+}
+
+#create-study-btn,
+#process-study-btn {
+    background-color: #4a90d9;
+    color: white;
+}
+
+#create-study-btn:hover:not(:disabled),
+#process-study-btn:hover:not(:disabled) {
+    background-color: #3a7fc8;
+}
+
+#run-analysis-btn {
+    background-color: #28a745;
+    color: white;
+}
+
+#run-analysis-btn:hover:not(:disabled) {
+    background-color: #218838;
+}
+
+button:disabled {
+    background-color: #ccc;
+    cursor: not-allowed;
+}
+
+/* Study Info */
+#study-info {
+    background-color: #f8f9fa;
+    padding: 0.75rem;
+    border-radius: 4px;
+    margin-bottom: 1rem;
+}
+
+#study-info p {
+    margin-bottom: 0.25rem;
+    font-size: 0.9rem;
+}
+
+/* Progress Bar */
+#progress-section {
+    margin-top: 1rem;
+}
+
+.progress-bar {
+    height: 8px;
+    background-color: #e9ecef;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 0.5rem;
+}
+
+.progress-fill {
+    height: 100%;
+    background-color: #4a90d9;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+#progress-text {
+    font-size: 0.85rem;
+    color: #666;
+}
+
+/* Results Section */
+#results-section {
+    margin-top: 1rem;
+    padding: 1rem;
+    background-color: #d4edda;
+    border-radius: 4px;
+}
+
+#results-section h2 {
+    color: #155724;
+    margin-bottom: 0.5rem;
+}
+
+#results-message {
+    font-size: 0.9rem;
+    color: #155724;
+    margin-bottom: 0.5rem;
+}
+
+#style-link {
+    display: inline-block;
+    color: #155724;
+    font-weight: 500;
+}
+
+/* Error Section */
+#error-section {
+    margin-top: 1rem;
+    padding: 1rem;
+    background-color: #f8d7da;
+    border-radius: 4px;
+}
+
+#error-section h3 {
+    color: #721c24;
+    margin-bottom: 0.5rem;
+}
+
+#error-message {
+    font-size: 0.9rem;
+    color: #721c24;
+}
+
+/* Map Container */
+#map-container {
+    flex: 1;
+    position: relative;
+}
+
+#map {
+    width: 100%;
+    height: 100%;
+}
+
+#map-instructions {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background-color: rgba(255, 255, 255, 0.95);
+    padding: 0.75rem 1.5rem;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    z-index: 1;
+}
+
+#map-instructions p {
+    font-size: 0.9rem;
+    color: #555;
+    margin: 0;
+}
+
+#map-instructions .icon {
+    font-size: 1.1rem;
+}
+
+/* Hidden class */
+.hidden {
+    display: none !important;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    main {
+        flex-direction: column;
+    }
+
+    #control-panel {
+        width: 100%;
+        min-width: 100%;
+        max-height: 50vh;
+        border-right: none;
+        border-bottom: 1px solid #e0e0e0;
+    }
+
+    #map-container {
+        height: 50vh;
+    }
+}
+
+/* MapBox Draw overrides */
+.mapbox-gl-draw_ctrl-draw-btn {
+    background-color: white !important;
+}
+
+.mapbox-gl-draw_polygon {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%23333' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='12 2 2 7 2 17 12 22 22 17 22 7 12 2'%3E%3C/polygon%3E%3C/svg%3E") !important;
+}

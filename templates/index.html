@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demalytics - Storage Market Analysis</title>
+
+    <!-- MapBox GL JS -->
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+
+    <!-- MapBox GL Draw -->
+    <script src="https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-draw/v1.4.3/mapbox-gl-draw.js"></script>
+    <link href="https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-draw/v1.4.3/mapbox-gl-draw.css" rel="stylesheet">
+
+    <!-- Custom CSS -->
+    <link href="/static/css/style.css" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <h1>Demalytics - Storage Market Analysis</h1>
+    </header>
+
+    <main>
+        <aside id="control-panel">
+            <h2>Create Study</h2>
+
+            <form id="study-form">
+                <div class="form-group">
+                    <label for="customer">Customer</label>
+                    <select id="customer" name="customer" required>
+                        <option value="">Select a customer...</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="study-name">Study Name</label>
+                    <input type="text" id="study-name" name="study-name" required placeholder="Enter study name">
+                </div>
+
+                <div class="form-group">
+                    <label for="description">Description (optional)</label>
+                    <textarea id="description" name="description" rows="2" placeholder="Study description"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label>Country</label>
+                    <div class="radio-group">
+                        <label class="radio-label">
+                            <input type="radio" name="country" value="CA" checked>
+                            Canada
+                        </label>
+                        <label class="radio-label">
+                            <input type="radio" name="country" value="US" disabled>
+                            United States (coming soon)
+                        </label>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Study Area</label>
+                    <p class="help-text">Use the polygon tool on the map to draw your study area.</p>
+                    <div id="geometry-status" class="status-box">
+                        <span class="status-indicator not-ready"></span>
+                        No area selected
+                    </div>
+                </div>
+
+                <div class="button-group">
+                    <button type="submit" id="create-study-btn" disabled>Create Study</button>
+                </div>
+            </form>
+
+            <hr>
+
+            <div id="analysis-section" class="hidden">
+                <h2>Run Analysis</h2>
+
+                <div id="study-info">
+                    <p><strong>Study:</strong> <span id="current-study-name">-</span></p>
+                    <p><strong>ID:</strong> <span id="current-study-id">-</span></p>
+                </div>
+
+                <div class="button-group">
+                    <button type="button" id="process-study-btn">Process Study</button>
+                    <button type="button" id="run-analysis-btn" disabled>Generate Map</button>
+                </div>
+
+                <div id="progress-section" class="hidden">
+                    <h3>Progress</h3>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progress-fill"></div>
+                    </div>
+                    <p id="progress-text">Waiting...</p>
+                </div>
+            </div>
+
+            <div id="results-section" class="hidden">
+                <h2>Results</h2>
+                <p id="results-message"></p>
+                <a id="style-link" href="#" target="_blank" class="hidden">Open in MapBox Studio</a>
+            </div>
+
+            <div id="error-section" class="hidden">
+                <h3>Error</h3>
+                <p id="error-message"></p>
+            </div>
+        </aside>
+
+        <div id="map-container">
+            <div id="map"></div>
+            <div id="map-instructions">
+                <p>Click the polygon tool <span class="icon">&#11206;</span> in the top-left to draw a study area</p>
+            </div>
+        </div>
+    </main>
+
+    <!-- Custom JavaScript -->
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
